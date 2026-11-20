@@ -73,10 +73,20 @@ app.addHook('onSend', async (req, reply, payload) => {
 
 app.setErrorHandler((error: unknown, _req, reply) => {
   const err = error as { statusCode?: number; name?: string; code?: string; message?: string }
-  const status = err.statusCode ?? (err.name === 'ZodError' ? 400 : 500)
+  const isValidation = err.name === 'ZodError'
+  const status = err.statusCode ?? (isValidation ? 400 : 500)
   if (status >= 500) app.log.error(err)
+  if (isValidation) {
+    const issues = (err as { issues?: { message?: string; path?: (string | number)[] }[] }).issues ?? []
+    const first = issues[0]
+    return reply.code(400).send({
+      error: 'validation_error',
+      message: first?.message ?? 'Некорректные данные',
+      field: first?.path?.join('.'),
+    })
+  }
   reply.code(status).send({
-    error: err.name === 'ZodError' ? 'validation_error' : (err.code ?? 'error'),
+    error: err.code ?? 'error',
     message: status >= 500 ? 'Внутренняя ошибка' : err.message,
   })
 })

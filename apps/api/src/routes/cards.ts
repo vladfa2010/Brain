@@ -36,7 +36,7 @@ const createSchema = z.object({
   why: z.string().nullish(),
   researchKind: z.enum(['article', 'video', 'book', 'topic', 'product', 'person']).nullish(),
   researchUrl: z.string().nullish(),
-  checklist: z.array(z.string()).optional(),
+  checklist: z.array(z.string().max(300)).max(50).optional(),
 })
 
 const patchSchema = z.object({
