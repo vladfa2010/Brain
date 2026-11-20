@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
-import { one, q } from '../db.js'
+import { one, q, run } from '../db.js'
 import { logEvent } from '../lib/events.js'
 import {
   CARD_SELECT, findSimilar, getCardRow, horizonRank, listCards,
@@ -194,9 +194,10 @@ export function registerCardRoutes(app: FastifyInstance) {
     return { card: toCard((await getCardRow(id, req.userId))!) }
   })
 
-  app.delete('/api/cards/:id', async (req) => {
+  app.delete('/api/cards/:id', async (req, reply) => {
     const { id } = req.params as { id: string }
-    await q('delete from cards where id = $1 and user_id = $2', [id, req.userId])
+    const removed = await run('delete from cards where id = $1 and user_id = $2', [id, req.userId])
+    if (!removed) return reply.code(404).send({ error: 'not_found' })
     return { ok: true }
   })
 
@@ -392,7 +393,7 @@ export function registerCardRoutes(app: FastifyInstance) {
     return reply.code(201).send({ item: row })
   })
 
-  app.patch('/api/checklist/:id', async (req) => {
+  app.patch('/api/checklist/:id', async (req, reply) => {
     const { id } = req.params as { id: string }
     const body = z
       .object({ title: z.string().min(1).optional(), done: z.boolean().optional() })
@@ -403,21 +404,23 @@ export function registerCardRoutes(app: FastifyInstance) {
     if (body.done !== undefined) { values.push(body.done); sets.push(`done = $${values.length}`) }
     if (sets.length) {
       values.push(id, req.userId)
-      await q(
+      const updated = await run(
         `update checklists set ${sets.join(', ')} where id = $${values.length - 1}
            and card_id in (select id from cards where user_id = $${values.length})`,
         values,
       )
+      if (!updated) return reply.code(404).send({ error: 'not_found' })
     }
     return { ok: true }
   })
 
-  app.delete('/api/checklist/:id', async (req) => {
+  app.delete('/api/checklist/:id', async (req, reply) => {
     const { id } = req.params as { id: string }
-    await q(
+    const removed = await run(
       'delete from checklists where id = $1 and card_id in (select id from cards where user_id = $2)',
       [id, req.userId],
     )
+    if (!removed) return reply.code(404).send({ error: 'not_found' })
     return { ok: true }
   })
 
@@ -446,7 +449,7 @@ export function registerCardRoutes(app: FastifyInstance) {
     return reply.code(201).send({ note: mapNote(row!) })
   })
 
-  app.patch('/api/notes/:id', async (req) => {
+  app.patch('/api/notes/:id', async (req, reply) => {
     const { id } = req.params as { id: string }
     const body = z
       .object({
@@ -473,7 +476,8 @@ export function registerCardRoutes(app: FastifyInstance) {
          and card_id in (select id from cards where user_id = $${values.length}) returning *`,
       values,
     )
-    return { note: row ? mapNote(row) : null }
+    if (!row) return reply.code(404).send({ error: 'not_found' })
+    return { note: mapNote(row) }
   })
 
   app.delete('/api/notes/:id', async (req) => {

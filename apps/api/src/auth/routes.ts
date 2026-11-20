@@ -32,6 +32,10 @@ setInterval(() => {
 const emailField = z.string().trim().toLowerCase().email('Некорректная почта').max(200)
 const passwordField = z.string().min(10, 'Пароль короче 10 символов').max(200)
 
+// Хеш-пустышка: проверяем пароль даже для несуществующей почты,
+// иначе по времени ответа видно, зарегистрирован аккаунт или нет.
+const DUMMY_HASH = hashPassword('dummy-password-for-constant-time-000')
+
 const publicUser = (u: { id: string; email: string; name: string | null }) => ({
   id: u.id, email: u.email, name: u.name,
 })
@@ -121,27 +125,25 @@ export function registerAuthRoutes(app: FastifyInstance) {
       failed_attempts: number; locked_until: Date | null
     }>('select id, email, name, password_hash, failed_attempts, locked_until from users where lower(email) = lower($1)', [body.email])
 
-    if (!user) {
-      await auditEvent({ email: body.email, type: 'login_failed', req })
-      return invalid()
-    }
-    if (user.locked_until && new Date(user.locked_until) > new Date()) {
+    if (user?.locked_until && new Date(user.locked_until) > new Date()) {
       return reply.code(429).send({
         error: 'locked', message: `Слишком много попыток. Вход заблокирован на ${LOCK_MINUTES} минут.`,
       })
     }
 
-    const ok = await verifyPassword(body.password, user.password_hash)
-    if (!ok) {
-      const attempts = Number(user.failed_attempts) + 1
-      const lock = attempts >= LOCK_AFTER
-      await q(
-        `update users set failed_attempts = $2,
-           locked_until = case when $3 then now() + ($4 || ' minutes')::interval else locked_until end
-         where id = $1`,
-        [user.id, lock ? 0 : attempts, lock, String(LOCK_MINUTES)],
-      )
-      await auditEvent({ userId: user.id, email: user.email, type: 'login_failed', req })
+    const ok = await verifyPassword(body.password, user?.password_hash ?? (await DUMMY_HASH))
+    if (!user || !ok) {
+      if (user) {
+        const attempts = Number(user.failed_attempts) + 1
+        const lock = attempts >= LOCK_AFTER
+        await q(
+          `update users set failed_attempts = $2,
+             locked_until = case when $3 then now() + ($4 || ' minutes')::interval else locked_until end
+           where id = $1`,
+          [user.id, lock ? 0 : attempts, lock, String(LOCK_MINUTES)],
+        )
+      }
+      await auditEvent({ userId: user?.id ?? null, email: body.email, type: 'login_failed', req })
       return invalid()
     }
 

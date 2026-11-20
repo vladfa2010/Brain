@@ -65,6 +65,13 @@ export async function rotateRefresh(
   if (!row) return null
 
   if (row.revoked_at) {
+    // Две вкладки обновились одновременно — это не кража: даём 10 секунд
+    // и выдаём ещё одну сессию, вместо того чтобы разлогинить всё.
+    const age = Date.now() - new Date(row.revoked_at).getTime()
+    if (age < 10_000) {
+      await issueRefresh(row.user_id, req, reply)
+      return row.user_id
+    }
     await revokeAllSessions(row.user_id)
     return null
   }

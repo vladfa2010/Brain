@@ -19,6 +19,11 @@ export async function one<T = Record<string, unknown>>(
   return rows[0] ?? null
 }
 
+export async function run(text: string, params: unknown[] = []): Promise<number> {
+  const res = await pool.query(text, params as never[])
+  return res.rowCount ?? 0
+}
+
 export async function tx<T>(fn: (client: pg.PoolClient) => Promise<T>): Promise<T> {
   const client = await pool.connect()
   try {

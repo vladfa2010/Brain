@@ -22,4 +22,9 @@ export const env = {
   // JWT: в проде секрет обязателен, в деве генерируется на старте
   jwtSecret: process.env.JWT_SECRET || '',
   cookieSecure: process.env.COOKIE_SECURE === '1' || process.env.NODE_ENV === 'production',
+  // доверять X-Forwarded-For только за известным прокси
+  trustProxy: process.env.TRUST_PROXY === '1',
+  // белый список origin'ов для CORS (через запятую)
+  webOrigins: (process.env.WEB_ORIGIN || 'http://localhost:5173')
+    .split(',').map((o) => o.trim()).filter(Boolean),
 }

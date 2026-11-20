@@ -27,12 +27,49 @@ if (!env.jwtSecret) {
 const app = Fastify({
   logger: { level: process.env.LOG_LEVEL ?? 'info' },
   bodyLimit: 5 * 1024 * 1024,
-  trustProxy: true,
+  trustProxy: env.trustProxy,
 })
 
-await app.register(cors, { origin: true, credentials: true })
+// CORS только для своих origin'ов: отражать любой Origin с credentials нельзя
+const allowedOrigins = new Set(env.webOrigins)
+await app.register(cors, {
+  credentials: true,
+  origin(origin, cb) {
+    if (!origin) return cb(null, true)
+    return cb(null, allowedOrigins.has(origin))
+  },
+})
 await app.register(cookie)
 registerAuthGuard(app)
+
+const CSP = [
+  "default-src 'self'",
+  "script-src 'self'",
+  "style-src 'self' 'unsafe-inline'",
+  "img-src 'self' data: blob:",
+  "font-src 'self'",
+  "connect-src 'self'",
+  "object-src 'none'",
+  "base-uri 'self'",
+  "form-action 'self'",
+  "frame-ancestors 'none'",
+].join('; ')
+
+app.addHook('onSend', async (req, reply, payload) => {
+  reply.header('x-content-type-options', 'nosniff')
+  reply.header('x-frame-options', 'DENY')
+  reply.header('referrer-policy', 'strict-origin-when-cross-origin')
+  reply.header('permissions-policy', 'camera=(), microphone=(), geolocation=()')
+  reply.header('cross-origin-opener-policy', 'same-origin')
+  if (env.cookieSecure) {
+    reply.header('strict-transport-security', 'max-age=31536000; includeSubDomains')
+  }
+  // CSP ставим только на собранный фронт: в dev Vite вставляет инлайн-скрипты
+  if (env.serveWeb && !req.url.startsWith('/api') && (reply.getHeader('content-type') ?? '').toString().includes('text/html')) {
+    reply.header('content-security-policy', CSP)
+  }
+  return payload
+})
 
 app.setErrorHandler((error: unknown, _req, reply) => {
   const err = error as { statusCode?: number; name?: string; code?: string; message?: string }
@@ -40,7 +77,7 @@ app.setErrorHandler((error: unknown, _req, reply) => {
   if (status >= 500) app.log.error(err)
   reply.code(status).send({
     error: err.name === 'ZodError' ? 'validation_error' : (err.code ?? 'error'),
-    message: err.message,
+    message: status >= 500 ? 'Внутренняя ошибка' : err.message,
   })
 })
 

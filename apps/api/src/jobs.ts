@@ -1,6 +1,6 @@
 import cron from 'node-cron'
 import { env } from './env.js'
-import { q } from './db.js'
+import { q, run } from './db.js'
 import { rolloverDay, runAgent } from './agent/run.js'
 
 async function eachUser(task: (userId: string) => Promise<void>) {
@@ -27,6 +27,17 @@ export function startJobs() {
       const res = await runAgent(userId, 'schedule')
       console.log(`[jobs] agent: ${res.summary}`)
     })
+  }, { timezone: env.timezone })
+
+  // раз в сутки чистим просроченные refresh-токены и старый журнал входов
+  cron.schedule('15 3 * * *', async () => {
+    const tokens = await run(
+      `delete from refresh_tokens
+       where expires_at < now() - interval '7 days'
+          or (revoked_at is not null and revoked_at < now() - interval '7 days')`,
+    )
+    const events = await run(`delete from auth_events where created_at < now() - interval '180 days'`)
+    console.log(`[jobs] cleanup: сессий ${tokens}, событий входа ${events}`)
   }, { timezone: env.timezone })
 
   console.log(`[jobs] расписание включено (${env.timezone}): 00:05 перенос дня, 07:30 агент`)
