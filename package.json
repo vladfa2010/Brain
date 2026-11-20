@@ -1,0 +1,22 @@
+{
+  "name": "secondbrain",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "pnpm -r --parallel dev",
+    "dev:api": "pnpm --filter @sb/api dev",
+    "dev:web": "pnpm --filter @sb/web dev",
+    "build": "pnpm -r build",
+    "db:migrate": "pnpm --filter @sb/api migrate",
+    "db:seed": "pnpm --filter @sb/api seed",
+    "db:reset": "pnpm --filter @sb/api reset",
+    "brief": "pnpm --filter @sb/api brief",
+    "backup": "./scripts/backup.sh"
+  },
+  "packageManager": "pnpm@12.18.0",
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
+  }
+}
