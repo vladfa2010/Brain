@@ -65,12 +65,12 @@ export function toCard(r: CardRow) {
   }
 }
 
-export async function getCardRow(id: string): Promise<CardRow | null> {
-  return one(`${CARD_SELECT} where c.id = $1`, [id])
+export async function getCardRow(id: string, userId: string): Promise<CardRow | null> {
+  return one(`${CARD_SELECT} where c.id = $1 and c.user_id = $2`, [id, userId])
 }
 
-export async function listCards(where: string, params: unknown[] = []) {
-  const rows = await q(`${CARD_SELECT} where ${where} ${CARD_ORDER}`, params)
+export async function listCards(userId: string, where: string) {
+  const rows = await q(`${CARD_SELECT} where c.user_id = $1 and ${where} ${CARD_ORDER}`, [userId])
   return rows.map(toCard)
 }
 
@@ -79,10 +79,10 @@ export function horizonRank(h: string): number {
 }
 
 /** Пересчитывает эмбеддинги карточки по её смысловым полям и заметкам. */
-export async function refreshCardEmbedding(cardId: string): Promise<void> {
+export async function refreshCardEmbedding(cardId: string, userId: string): Promise<void> {
   const card = await one<{ title: string; why: string | null; verdict: string | null; my_take: string | null }>(
-    'select title, why, verdict, my_take from cards where id = $1',
-    [cardId],
+    'select title, why, verdict, my_take from cards where id = $1 and user_id = $2',
+    [cardId, userId],
   )
   if (!card) return
   const notes = await q<{ body: string }>(
@@ -93,21 +93,22 @@ export async function refreshCardEmbedding(cardId: string): Promise<void> {
     .filter(Boolean)
     .join('\n')
   const vec = embed(text)
-  await q('update cards set embedding = $2::vector where id = $1', [cardId, toVectorLiteral(vec)])
+  await q('update cards set embedding = $2::vector where id = $1 and user_id = $3', [cardId, toVectorLiteral(vec), userId])
 }
 
 /** Вектор «похожих» карточек + сохранённые ссылки на них. */
-export async function findSimilar(cardId: string, limit = 4) {
+export async function findSimilar(cardId: string, userId: string, limit = 4) {
   const rows = await q(
     `select c.id, c.title, c.type, c.state,
             1 - (c.embedding <=> src.embedding) as score
      from cards src
      join cards c on c.id <> src.id
-     where src.id = $1 and src.embedding is not null and c.embedding is not null
+     where src.id = $1 and src.user_id = $2 and c.user_id = $2
+       and src.embedding is not null and c.embedding is not null
        and c.state = 'active' and c.parent_id is null
      order by c.embedding <=> src.embedding
-     limit $2`,
-    [cardId, limit],
+     limit $3`,
+    [cardId, userId, limit],
   )
   return rows.map((r) => ({ ...r, score: Number(r.score) }))
 }

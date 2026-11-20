@@ -25,7 +25,7 @@ services:
       API_HOST: 0.0.0.0
       API_PORT: 4010
       TZ: ${TZ:-Europe/Moscow}
-      AUTH_TOKEN: ${AUTH_TOKEN:-}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET обязателен — сгенерируйте: openssl rand -base64 32}
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
       LLM_MODEL: ${LLM_MODEL:-deepseek-flash}
     ports:

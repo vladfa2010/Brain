@@ -4,12 +4,14 @@ import { getDashboard } from '../lib/dashboard.js'
 import { embed, toVectorLiteral } from '../lib/embed.js'
 
 export function registerReadRoutes(app: FastifyInstance) {
-  app.get('/api/bootstrap', async () => {
+  app.get('/api/bootstrap', async (req) => {
     const areas = await q<{ id: string; name: string; glyph: string; hue: string; sort_order: number }>(
-      'select * from areas where archived_at is null order by sort_order, name',
+      'select * from areas where user_id = $1 and archived_at is null order by sort_order, name',
+      [req.userId],
     )
     const projects = await q<{ id: string; name: string; area_id: string | null; status: string }>(
-      "select * from projects where status = 'active' order by name",
+      "select * from projects where user_id = $1 and status = 'active' order by name",
+      [req.userId],
     )
     const counts = await one<{
       inbox: string; today: string; week: string; waiting: string; overdue: string; done_week: string
@@ -21,19 +23,22 @@ export function registerReadRoutes(app: FastifyInstance) {
         count(*) filter (where stage='waiting' and state='active') as waiting,
         count(*) filter (where state='active' and due_at < now() and stage<>'done') as overdue,
         count(*) filter (where stage='done' and completed_at > now() - interval '7 days') as done_week
-      from cards where parent_id is null
-    `)
-    const settingsRows = await q<{ key: string; value: unknown }>('select key, value from settings')
+      from cards where user_id = $1 and parent_id is null
+    `, [req.userId])
+    const settingsRows = await q<{ key: string; value: unknown }>('select key, value from settings where user_id = $1', [req.userId])
     const settings: Record<string, unknown> = {}
     for (const r of settingsRows) settings[r.key] = r.value
     const areaCounts = await q<{ area_id: string; n: string }>(
       `select area_id, count(*) as n from cards
-       where state = 'active' and stage <> 'done' and area_id is not null
+       where user_id = $1 and state = 'active' and stage <> 'done' and area_id is not null
        group by area_id`,
+      [req.userId],
     )
     const countByArea = new Map(areaCounts.map((r) => [r.area_id, Number(r.n)]))
     const lastRun = await one(
-      `select id, started_at, finished_at, status, summary from agent_runs order by started_at desc limit 1`,
+      `select id, started_at, finished_at, status, summary from agent_runs
+       where user_id = $1 order by started_at desc limit 1`,
+      [req.userId],
     )
     return {
       areas: areas.map((a) => ({
@@ -58,7 +63,7 @@ export function registerReadRoutes(app: FastifyInstance) {
     }
   })
 
-  app.get('/api/dashboard', async () => getDashboard())
+  app.get('/api/dashboard', async (req) => getDashboard(req.userId))
 
   app.get('/api/search', async (req) => {
     const { q: query = '' } = req.query as { q?: string }
@@ -68,16 +73,16 @@ export function registerReadRoutes(app: FastifyInstance) {
     const lexical = await q<{ id: string; title: string; type: string; rank: number }>(
       `select id, title, type, ts_rank(search, plainto_tsquery('russian', $1)) as rank
        from cards
-       where search @@ plainto_tsquery('russian', $1) and state <> 'dropped'
+       where search @@ plainto_tsquery('russian', $1) and state <> 'dropped' and user_id = $2
        order by rank desc limit 20`,
-      [term],
+      [term, req.userId],
     )
     const vector = await q<{ id: string; title: string; type: string; score: number }>(
       `select id, title, type, 1 - (embedding <=> $1::vector) as score
        from cards
-       where embedding is not null and state <> 'dropped'
+       where embedding is not null and state <> 'dropped' and user_id = $2
        order by embedding <=> $1::vector limit 20`,
-      [toVectorLiteral(embed(term))],
+      [toVectorLiteral(embed(term)), req.userId],
     )
 
     const merged = new Map<string, { id: string; title: string; type: string; score: number }>()

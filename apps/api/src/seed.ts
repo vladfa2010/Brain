@@ -1,8 +1,11 @@
+import { randomBytes } from 'node:crypto'
 import { pool, q, one } from './db.js'
 import { refreshCardEmbedding } from './lib/cards.js'
 import { runAgent } from './agent/run.js'
+import { hashPassword } from './auth/password.js'
 
 const ids: Record<string, string> = {}
+let userId = ''
 
 function d(days: number, hour = 12, minute = 0): Date {
   const x = new Date()
@@ -43,8 +46,9 @@ async function card(input: CardInput): Promise<string> {
     `insert into cards (title, type, horizon, stage, priority, area_id, project_id,
                         estimate_min, due_at, due_kind, scheduled_at, why, research_kind,
                         research_url, research_status, postpone_count, last_postponed_at,
-                        state, completed_at, dropped_at, dropped_reason, sort_order, created_at)
-     values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)
+                        state, completed_at, dropped_at, dropped_reason, sort_order, created_at,
+                        user_id)
+     values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)
      returning id`,
     [
       input.title,
@@ -70,6 +74,7 @@ async function card(input: CardInput): Promise<string> {
       input.droppedReason ?? null,
       input.sort ?? 1024,
       d(-(input.createdAgo ?? 6)),
+      userId,
     ],
   )
   ids[input.key] = row!.id
@@ -111,7 +116,16 @@ async function note(
 
 async function main() {
   await q(`truncate events, checklists, notes, attachments, cards, projects, areas,
-           briefs, agent_runs restart identity cascade`)
+           briefs, agent_runs, refresh_tokens, auth_events, users restart identity cascade`)
+
+  const email = process.env.SEED_EMAIL || 'demo@secondbrain.local'
+  const password = process.env.SEED_PASSWORD || randomBytes(9).toString('base64url')
+  const user = await one<{ id: string }>(
+    `insert into users (email, password_hash, name) values ($1,$2,$3) returning id`,
+    [email, await hashPassword(password), 'Влад'],
+  )
+  userId = user!.id
+  console.log(`Демо-вход: ${email} / ${password}`)
 
   const areas: [string, string, string, string][] = [
     ['biz', 'Бизнес', '◆', 'oxide'],
@@ -122,8 +136,8 @@ async function main() {
   for (let i = 0; i < areas.length; i++) {
     const [key, name, glyph, hue] = areas[i]
     const row = await one<{ id: string }>(
-      `insert into areas (name, glyph, hue, sort_order) values ($1,$2,$3,$4) returning id`,
-      [name, glyph, hue, i * 1024],
+      `insert into areas (name, glyph, hue, sort_order, user_id) values ($1,$2,$3,$4,$5) returning id`,
+      [name, glyph, hue, i * 1024, userId],
     )
     ids[key] = row!.id
   }
@@ -135,8 +149,8 @@ async function main() {
   ]
   for (const [key, name, area] of projects) {
     const row = await one<{ id: string }>(
-      `insert into projects (name, area_id, status) values ($1,$2,'active') returning id`,
-      [name, ids[area]],
+      `insert into projects (name, area_id, status, user_id) values ($1,$2,'active',$3) returning id`,
+      [name, ids[area], userId],
     )
     ids[key] = row!.id
   }
@@ -346,16 +360,17 @@ async function main() {
 
   // ── настройки ────────────────────────────────────────────────
   await q(
-    `insert into settings (key, value) values
-       ('day_budget', '3'), ('wip_limit', '4'), ('timezone', '"Asia/Yekaterinburg"'),
-       ('user_name', '"Влад"')
-     on conflict (key) do update set value = excluded.value`,
+    `insert into settings (user_id, key, value) values
+       ($1, 'day_budget', '3'), ($1, 'wip_limit', '4'), ($1, 'timezone', '"Asia/Yekaterinburg"'),
+       ($1, 'user_name', '"Влад"')
+     on conflict (user_id, key) do update set value = excluded.value`,
+    [userId],
   )
 
   // эмбеддинги + первый прогон агента и бриф
   const all = await q<{ id: string }>('select id from cards')
-  for (const c of all) await refreshCardEmbedding(c.id)
-  const run = await runAgent('manual')
+  for (const c of all) await refreshCardEmbedding(c.id, userId)
+  const run = await runAgent(userId, 'manual')
   console.log('seed ok:', Object.keys(ids).length, 'сущностей ·', run.summary)
   await pool.end()
 }

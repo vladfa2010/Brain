@@ -1,25 +1,22 @@
 import { useEffect, useState } from 'react'
 import { Navigate, Route, Routes, useNavigate, useSearchParams } from 'react-router-dom'
-import { useQueryClient } from '@tanstack/react-query'
 import { Sidebar } from './components/Sidebar'
 import { CardDrawer } from './components/CardDrawer'
 import { ToastProvider } from './components/Toast'
-import { AuthGate } from './components/AuthGate'
 import { MobileBar } from './components/MobileBar'
+import { useAuth } from './auth/AuthProvider'
 import { applyTheme } from './lib/theme'
 import { DashboardPage } from './pages/Dashboard'
 import { BoardPage } from './pages/Board'
 import { InboxPage } from './pages/Inbox'
+import { LoginPage } from './pages/Login'
 
 export default function App() {
-  const queryClient = useQueryClient()
+  const { status } = useAuth()
   const navigate = useNavigate()
   const [params, setParams] = useSearchParams()
-  const [needAuth, setNeedAuth] = useState(false)
   const [menuOpen, setMenuOpen] = useState(false)
 
-  // карточка — это часть адреса, поэтому «назад» в браузере её закрывает,
-  // а «вперёд» — снова открывает
   const openCard = params.get('card')
 
   const open = (id: string | null) => {
@@ -44,12 +41,6 @@ export default function App() {
   }, [params])
 
   useEffect(() => {
-    const onUnauthorized = () => setNeedAuth(true)
-    window.addEventListener('sb:unauthorized', onUnauthorized)
-    return () => window.removeEventListener('sb:unauthorized', onUnauthorized)
-  }, [])
-
-  useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
         e.preventDefault()
@@ -60,16 +51,15 @@ export default function App() {
     return () => document.removeEventListener('keydown', onKey)
   })
 
-  if (needAuth) {
+  if (status === 'loading') {
     return (
-      <AuthGate
-        onDone={() => {
-          setNeedAuth(false)
-          queryClient.invalidateQueries()
-        }}
-      />
+      <div className="splash">
+        <div className="wordmark-mark">S</div>
+      </div>
     )
   }
+
+  if (status === 'guest') return <LoginPage />
 
   return (
     <ToastProvider>

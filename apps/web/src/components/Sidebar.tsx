@@ -2,15 +2,17 @@ import { NavLink, useNavigate } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { api } from '../api'
 import { fmtDayLabel } from '../lib/format'
-import { Board, Inbox, Moon, Plus, Sun } from './Icons'
+import { Board, Inbox, LogOut, Moon, Plus, Sun } from './Icons'
 import { useTheme } from '../lib/theme'
 import { useToast } from './Toast'
+import { useAuth } from '../auth/AuthProvider'
 
 export function Sidebar({ open, onNavigate }: { open: boolean; onNavigate: () => void }) {
   const { data } = useQuery({ queryKey: ['bootstrap'], queryFn: api.bootstrap })
   const navigate = useNavigate()
   const toast = useToast()
   const [theme, setTheme] = useTheme()
+  const { user, logout } = useAuth()
 
   const run = data?.lastAgentRun
   const counts = data?.counts
@@ -55,6 +57,12 @@ export function Sidebar({ open, onNavigate }: { open: boolean; onNavigate: () =>
       </div>
 
       <div className="side-bottom">
+        <div className="user-row">
+          <span className="user-name">{user?.name ?? user?.email}</span>
+          <button className="icon-btn" title="Выйти" onClick={() => logout()}>
+            <LogOut size={14} />
+          </button>
+        </div>
         <div className="theme-row">
           Тема
           <div className="theme-switch" role="group" aria-label="Тема оформления">

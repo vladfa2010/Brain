@@ -19,6 +19,7 @@ export const env = {
   timezone: process.env.TZ || 'Asia/Yekaterinburg',
   // production: тот же процесс отдаёт и API, и собранный фронт (один origin)
   serveWeb: process.env.SERVE_WEB === '1',
-  // если задан — все /api требуют Bearer-токен (обязательно для VDS)
-  authToken: process.env.AUTH_TOKEN || null,
+  // JWT: в проде секрет обязателен, в деве генерируется на старте
+  jwtSecret: process.env.JWT_SECRET || '',
+  cookieSecure: process.env.COOKIE_SECURE === '1' || process.env.NODE_ENV === 'production',
 }

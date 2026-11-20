@@ -8,18 +8,18 @@ import { draftResearch } from './llm.js'
 export type Step = { name: string; detail: string; ms?: number }
 
 /**
- * Один прогон агента в сутки:
+ * Один прогон агента в сутки для конкретного пользователя:
  *  1. чинит эмбеддинги,
  *  2. дотягивает ресерч там, где он застрял,
  *  3. ищет дубли,
  *  4. считает бриф и совет дня,
  *  5. отмечает залежавшееся.
- * Всё логируется в agent_runs, чтобы было видно, чем он занят.
  */
-export async function runAgent(trigger: 'schedule' | 'manual' = 'manual') {
+export async function runAgent(userId: string, trigger: 'schedule' | 'manual' = 'manual') {
   const started = Date.now()
   const run = await one<{ id: string }>(
-    `insert into agent_runs (status) values ('running') returning id`,
+    `insert into agent_runs (user_id, status) values ($1, 'running') returning id`,
+    [userId],
   )
   if (!run) throw new Error('cannot start agent run')
   const steps: Step[] = []
@@ -27,9 +27,10 @@ export async function runAgent(trigger: 'schedule' | 'manual' = 'manual') {
   try {
     const t0 = Date.now()
     const missing = await q<{ id: string }>(
-      "select id from cards where embedding is null and state = 'active'",
+      "select id from cards where user_id = $1 and embedding is null and state = 'active'",
+      [userId],
     )
-    for (const c of missing) await refreshCardEmbedding(c.id)
+    for (const c of missing) await refreshCardEmbedding(c.id, userId)
     steps.push({
       name: 'память',
       detail: missing.length
@@ -44,11 +45,12 @@ export async function runAgent(trigger: 'schedule' | 'manual' = 'manual') {
       const candidates = await q<{ id: string; title: string; why: string | null }>(
         `select c.id, c.title, c.why
          from cards c
-         where c.type = 'research' and c.state = 'active'
+         where c.user_id = $1 and c.type = 'research' and c.state = 'active'
            and c.research_status = 'new'
            and not exists (select 1 from notes n
                            where n.card_id = c.id and n.author = 'agent' and n.kind = 'research')
          order by c.created_at limit 2`,
+        [userId],
       )
       for (const c of candidates) {
         const notes = await q<{ body: string }>(
@@ -64,8 +66,9 @@ export async function runAgent(trigger: 'schedule' | 'manual' = 'manual') {
           [c.id, draft],
         )
         await q(
-          `update cards set research_status = 'seen', updated_at = now() where id = $1`,
-          [c.id],
+          `update cards set research_status = 'seen', updated_at = now()
+           where id = $1 and user_id = $2`,
+          [c.id, userId],
         )
         await logEvent(c.id, 'agent', 'agent_research', { trigger })
         researched++
@@ -85,11 +88,13 @@ export async function runAgent(trigger: 'schedule' | 'manual' = 'manual') {
     const dupes = await q<{ a: string; b: string; score: number }>(
       `select a.id as a, b.id as b, 1 - (a.embedding <=> b.embedding) as score
        from cards a join cards b on a.id < b.id
-       where a.embedding is not null and b.embedding is not null
+       where a.user_id = $1 and b.user_id = $1
+         and a.embedding is not null and b.embedding is not null
          and a.state = 'active' and b.state = 'active'
          and a.horizon = 'inbox' and b.horizon = 'inbox'
          and 1 - (a.embedding <=> b.embedding) > 0.62
        limit 5`,
+      [userId],
     )
     steps.push({
       name: 'дубли',
@@ -100,8 +105,9 @@ export async function runAgent(trigger: 'schedule' | 'manual' = 'manual') {
     const t3 = Date.now()
     const stale = await one<{ n: string }>(
       `select count(*) as n from cards
-       where state = 'active' and stage <> 'done'
+       where user_id = $1 and state = 'active' and stage <> 'done'
          and coalesce(last_postponed_at, updated_at) < now() - interval '21 days'`,
+      [userId],
     )
     steps.push({
       name: 'залежалось',
@@ -110,11 +116,12 @@ export async function runAgent(trigger: 'schedule' | 'manual' = 'manual') {
     })
 
     const t4 = Date.now()
-    const dash = await getDashboard()
+    const dash = await getDashboard(userId)
     await q(
-      `insert into briefs (day, payload) values (current_date, $1)
-       on conflict (day) do update set payload = excluded.payload, created_at = now()`,
+      `insert into briefs (user_id, day, payload) values ($1, current_date, $2)
+       on conflict (user_id, day) do update set payload = excluded.payload, created_at = now()`,
       [
+        userId,
         JSON.stringify({
           advice: dash.advice,
           today: dash.today.map((c) => c.id),
@@ -128,7 +135,7 @@ export async function runAgent(trigger: 'schedule' | 'manual' = 'manual') {
     steps.push({ name: 'бриф', detail: 'собрал утреннюю сводку', ms: Date.now() - t4 })
 
     const summary =
-      `Проверил ${await countActive()} карточек · ` +
+      `Проверил ${await countActive(userId)} карточек · ` +
       `входящих ${dash.stats.inbox} · совет: «${dash.advice.title}»`
 
     await q(
@@ -147,20 +154,22 @@ export async function runAgent(trigger: 'schedule' | 'manual' = 'manual') {
   }
 }
 
-async function countActive(): Promise<number> {
+async function countActive(userId: string): Promise<number> {
   const row = await one<{ n: string }>(
-    "select count(*) as n from cards where state = 'active' and stage <> 'done'",
+    "select count(*) as n from cards where user_id = $1 and state = 'active' and stage <> 'done'",
+    [userId],
   )
   return Number(row?.n ?? 0)
 }
 
 /** Ночной перенос незакрытого «Сегодня» обратно на неделю. */
-export async function rolloverDay(): Promise<{ moved: number }> {
+export async function rolloverDay(userId: string): Promise<{ moved: number }> {
   const rows = await q<{ id: string }>(
     `update cards
      set horizon = 'week', updated_at = now()
-     where horizon = 'today' and state = 'active' and stage <> 'done'
+     where user_id = $1 and horizon = 'today' and state = 'active' and stage <> 'done'
      returning id`,
+    [userId],
   )
   for (const r of rows) {
     await logEvent(r.id, 'system', 'rollover', { from: 'today', to: 'week' })

@@ -3,7 +3,6 @@ import { z } from 'zod'
 import { one } from '../db.js'
 import { logEvent } from '../lib/events.js'
 import { refreshCardEmbedding } from '../lib/cards.js'
-import { embed, toVectorLiteral } from '../lib/embed.js'
 
 const RESEARCH_VERBS = /(изучить|посмотреть|прочитать|почитать|разобрать|разобраться|глянуть|прочесть|узнать)/i
 const ACTION_VERBS = /(сделать|позвонить|написать|отправить|оплатить|купить|забрать|проверить|записаться|заказать|поручить|уточнить|съездить|встретиться)/i
@@ -59,10 +58,11 @@ export function registerCaptureRoutes(app: FastifyInstance) {
         : null
 
     const row = await one<{ id: string }>(
-      `insert into cards (title, type, horizon, priority, research_kind, research_url,
+      `insert into cards (user_id, title, type, horizon, priority, research_kind, research_url,
                           research_status, why)
-       values ($1,$2,'inbox','p2',$3,$4,$5,$6) returning id`,
+       values ($1,$2,$3,'inbox','p2',$4,$5,$6,$7) returning id`,
       [
+        req.userId,
         title.slice(0, 500),
         type,
         researchKind,
@@ -80,7 +80,7 @@ export function registerCaptureRoutes(app: FastifyInstance) {
       )
     }
     await logEvent(row.id, 'me', 'created', { source: 'capture', url })
-    await refreshCardEmbedding(row.id)
+    await refreshCardEmbedding(row.id, req.userId)
 
     return reply.code(201).send({
       cardId: row.id,
@@ -88,10 +88,4 @@ export function registerCaptureRoutes(app: FastifyInstance) {
       title,
     })
   })
-}
-
-export async function attachEmbedding(cardId: string, text: string) {
-  await one('update cards set embedding = $2::vector where id = $1', [
-    cardId, toVectorLiteral(embed(text)),
-  ])
 }

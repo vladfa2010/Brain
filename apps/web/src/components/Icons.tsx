@@ -66,6 +66,9 @@ export const ArrowLeft = ({ size, stroke }: P) => (
 export const Menu = ({ size, stroke }: P) => (
   <svg {...base(size, stroke)}><path d="M4 7h16M4 12h16M4 17h16" /></svg>
 )
+export const LogOut = ({ size, stroke }: P) => (
+  <svg {...base(size, stroke)}><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9" /></svg>
+)
 export const Moon = ({ size, stroke }: P) => (
   <svg {...base(size, stroke)}><path d="M20.5 14.3A8.2 8.2 0 0 1 9.7 3.5 8.5 8.5 0 1 0 20.5 14.3Z" /></svg>
 )

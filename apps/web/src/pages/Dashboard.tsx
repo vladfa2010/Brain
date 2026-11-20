@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
 import { api } from '../api'
+import { useAuth } from '../auth/AuthProvider'
 import { fmtDue, fmtMinutes, fmtToday, greeting, plural } from '../lib/format'
 import { TaskRow } from '../components/TaskRow'
 import { Capture } from '../components/Capture'
@@ -10,6 +11,7 @@ import { ArrowRight, ArrowUpRight, Sparkle } from '../components/Icons'
 export function DashboardPage({ onOpen }: { onOpen: (id: string) => void }) {
   const { data, isLoading } = useQuery({ queryKey: ['dashboard'], queryFn: api.dashboard })
   const { data: boot } = useQuery({ queryKey: ['bootstrap'], queryFn: api.bootstrap })
+  const { user } = useAuth()
   const qc = useQueryClient()
   const toast = useToast()
   const navigate = useNavigate()
@@ -24,7 +26,7 @@ export function DashboardPage({ onOpen }: { onOpen: (id: string) => void }) {
 
   if (isLoading || !data) return <DashboardSkeleton />
 
-  const name = boot?.settings?.name
+  const name = user?.name || boot?.settings?.name
   const capacity = 240
   const pct = Math.min(100, Math.round((data.todayMinutes / capacity) * 100))
   const over = data.todayMinutes > capacity

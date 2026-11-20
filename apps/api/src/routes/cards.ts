@@ -73,19 +73,26 @@ const FIELD_MAP: Record<string, string> = {
 const EMBED_FIELDS = new Set(['title', 'why', 'verdict', 'myTake'])
 
 export function registerCardRoutes(app: FastifyInstance) {
-  app.get('/api/board', async () => {
+  app.get('/api/board', async (req) => {
     const cards = await listCards(
+      req.userId,
       `c.state <> 'dropped' and c.parent_id is null
        and (c.stage <> 'done' or c.completed_at > now() - interval '3 days')`,
     )
-    const areas = await q(`select * from areas where archived_at is null order by sort_order, name`)
-    const projects = await q(`select * from projects where status = 'active' order by name`)
+    const areas = await q(
+      `select * from areas where user_id = $1 and archived_at is null order by sort_order, name`,
+      [req.userId],
+    )
+    const projects = await q(
+      `select * from projects where user_id = $1 and status = 'active' order by name`,
+      [req.userId],
+    )
     return { cards, areas: areas.map(mapArea), projects: projects.map(mapProject) }
   })
 
   app.get('/api/cards/:id', async (req, reply) => {
     const { id } = req.params as { id: string }
-    const row = await getCardRow(id)
+    const row = await getCardRow(id, req.userId)
     if (!row) return reply.code(404).send({ error: 'not_found' })
 
     const [checklist, notes, attachments, events, children, similar] = await Promise.all([
@@ -93,8 +100,8 @@ export function registerCardRoutes(app: FastifyInstance) {
       q(`select * from notes where card_id = $1 order by created_at`, [id]),
       q(`select * from attachments where card_id = $1 order by created_at`, [id]),
       q(`select * from events where card_id = $1 order by created_at desc limit 40`, [id]),
-      q(`${CARD_SELECT} where c.parent_id = $1 ${'order by c.created_at'}`, [id]),
-      findSimilar(id),
+      q(`${CARD_SELECT} where c.parent_id = $1 and c.user_id = $2 order by c.created_at`, [id, req.userId]),
+      findSimilar(id, req.userId),
     ])
 
     return {
@@ -112,14 +119,15 @@ export function registerCardRoutes(app: FastifyInstance) {
 
   app.post('/api/cards', async (req, reply) => {
     const body = createSchema.parse(req.body ?? {})
-    const pos = await nextPosition(body.horizon)
+    const pos = await nextPosition(req.userId, body.horizon)
     const inserted = await one<{ id: string }>(
-      `insert into cards (title, type, horizon, stage, area_id, project_id, parent_id,
+      `insert into cards (user_id, title, type, horizon, stage, area_id, project_id, parent_id,
                           priority, due_at, due_kind, scheduled_at, estimate_min, why,
                           research_kind, research_url, research_status, sort_order)
-       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
        returning id`,
       [
+        req.userId,
         body.title, body.type, body.horizon, body.stage, body.areaId ?? null,
         body.projectId ?? null, body.parentId ?? null, body.priority,
         body.dueAt ?? null, body.dueKind, body.scheduledAt ?? null,
@@ -144,14 +152,14 @@ export function registerCardRoutes(app: FastifyInstance) {
       )
     }
     await logEvent(inserted.id, 'me', 'created', { title: body.title })
-    await refreshCardEmbedding(inserted.id)
-    return reply.code(201).send({ card: toCard((await getCardRow(inserted.id))!) })
+    await refreshCardEmbedding(inserted.id, req.userId)
+    return reply.code(201).send({ card: toCard((await getCardRow(inserted.id, req.userId))!) })
   })
 
   app.patch('/api/cards/:id', async (req, reply) => {
     const { id } = req.params as { id: string }
     const body = patchSchema.parse(req.body ?? {})
-    const before = await getCardRow(id)
+    const before = await getCardRow(id, req.userId)
     if (!before) return reply.code(404).send({ error: 'not_found' })
 
     const sets: string[] = []
@@ -170,8 +178,11 @@ export function registerCardRoutes(app: FastifyInstance) {
     if ('stage' in body) {
       sets.push(`completed_at = ${body.stage === 'done' ? 'now()' : 'null'}`)
     }
-    values.push(id)
-    await q(`update cards set ${sets.join(', ')} where id = $${values.length}`, values)
+    values.push(id, req.userId)
+    await q(
+      `update cards set ${sets.join(', ')} where id = $${values.length - 1} and user_id = $${values.length}`,
+      values,
+    )
 
     if ('horizon' in body && body.horizon !== before.horizon) {
       await logEvent(id, 'me', 'moved', { group: 'horizon', from: before.horizon, to: body.horizon })
@@ -179,13 +190,13 @@ export function registerCardRoutes(app: FastifyInstance) {
     if ('stage' in body && body.stage !== before.stage) {
       await logEvent(id, 'me', 'moved', { group: 'stage', from: before.stage, to: body.stage })
     }
-    if (embeddingDirty) await refreshCardEmbedding(id)
-    return { card: toCard((await getCardRow(id))!) }
+    if (embeddingDirty) await refreshCardEmbedding(id, req.userId)
+    return { card: toCard((await getCardRow(id, req.userId))!) }
   })
 
   app.delete('/api/cards/:id', async (req) => {
     const { id } = req.params as { id: string }
-    await q('delete from cards where id = $1', [id])
+    await q('delete from cards where id = $1 and user_id = $2', [id, req.userId])
     return { ok: true }
   })
 
@@ -198,7 +209,7 @@ export function registerCardRoutes(app: FastifyInstance) {
         position: z.number().optional(),
       })
       .parse(req.body ?? {})
-    const before = await getCardRow(id)
+    const before = await getCardRow(id, req.userId)
     if (!before) return reply.code(404).send({ error: 'not_found' })
 
     const sets: string[] = [`updated_at = now()`]
@@ -233,7 +244,7 @@ export function registerCardRoutes(app: FastifyInstance) {
         sets.push('postpone_count = postpone_count + 1', 'last_postponed_at = now()')
         postponed = true
       }
-      const position = body.position ?? (await nextPosition(body.value))
+      const position = body.position ?? (await nextPosition(req.userId, body.value))
       values.push(position)
       sets.push(`sort_order = $${values.length}`)
     } else {
@@ -243,13 +254,16 @@ export function registerCardRoutes(app: FastifyInstance) {
       values.push(body.value)
       sets.push(`stage = $${values.length}`)
       sets.push(`completed_at = ${body.value === 'done' ? 'now()' : 'null'}`)
-      const position = body.position ?? (await nextPosition(before.horizon))
+      const position = body.position ?? (await nextPosition(req.userId, before.horizon))
       values.push(position)
       sets.push(`sort_order = $${values.length}`)
     }
 
-    values.push(id)
-    await q(`update cards set ${sets.join(', ')} where id = $${values.length}`, values)
+    values.push(id, req.userId)
+    await q(
+      `update cards set ${sets.join(', ')} where id = $${values.length - 1} and user_id = $${values.length}`,
+      values,
+    )
     await logEvent(id, 'me', 'moved', {
       group: body.group, from: before[body.group], to: body.value,
     })
@@ -258,7 +272,7 @@ export function registerCardRoutes(app: FastifyInstance) {
         from: before.horizon, to: body.value, count: Number(before.postpone_count) + 1,
       })
     }
-    return { card: toCard((await getCardRow(id))!) }
+    return { card: toCard((await getCardRow(id, req.userId))!) }
   })
 
   app.post('/api/cards/:id/postpone', async (req, reply) => {
@@ -270,7 +284,7 @@ export function registerCardRoutes(app: FastifyInstance) {
         force: z.boolean().optional(),
       })
       .parse(req.body ?? {})
-    const before = await getCardRow(id)
+    const before = await getCardRow(id, req.userId)
     if (!before) return reply.code(404).send({ error: 'not_found' })
     if (!body.force && Number(before.postpone_count) >= 2) {
       return reply.code(409).send({
@@ -279,64 +293,65 @@ export function registerCardRoutes(app: FastifyInstance) {
         count: Number(before.postpone_count) + 1,
       })
     }
-    const pos = await nextPosition(body.to)
+    const pos = await nextPosition(req.userId, body.to)
     await q(
       `update cards set horizon = $2, postpone_count = postpone_count + 1,
               last_postponed_at = now(), sort_order = $3, updated_at = now()
-       where id = $1`,
-      [id, body.to, pos],
+       where id = $1 and user_id = $4`,
+      [id, body.to, pos, req.userId],
     )
     await logEvent(id, 'me', 'postponed', {
       from: before.horizon, to: body.to, reason: body.reason ?? null,
       count: Number(before.postpone_count) + 1,
     })
-    return { card: toCard((await getCardRow(id))!) }
+    return { card: toCard((await getCardRow(id, req.userId))!) }
   })
 
   app.post('/api/cards/:id/complete', async (req, reply) => {
     const { id } = req.params as { id: string }
-    const row = await getCardRow(id)
+    const row = await getCardRow(id, req.userId)
     if (!row) return reply.code(404).send({ error: 'not_found' })
     await q(
-      `update cards set stage = 'done', completed_at = now(), updated_at = now() where id = $1`,
-      [id],
+      `update cards set stage = 'done', completed_at = now(), updated_at = now()
+       where id = $1 and user_id = $2`,
+      [id, req.userId],
     )
     await logEvent(id, 'me', 'completed', {})
-    return { card: toCard((await getCardRow(id))!) }
+    return { card: toCard((await getCardRow(id, req.userId))!) }
   })
 
   app.post('/api/cards/:id/drop', async (req, reply) => {
     const { id } = req.params as { id: string }
     const body = z.object({ reason: z.string().nullish() }).parse(req.body ?? {})
-    const row = await getCardRow(id)
+    const row = await getCardRow(id, req.userId)
     if (!row) return reply.code(404).send({ error: 'not_found' })
     await q(
       `update cards set state = 'dropped', dropped_at = now(), dropped_reason = $2,
-              updated_at = now() where id = $1`,
-      [id, body.reason ?? null],
+              updated_at = now() where id = $1 and user_id = $3`,
+      [id, body.reason ?? null, req.userId],
     )
     await logEvent(id, 'me', 'dropped', { reason: body.reason ?? null })
-    return { card: toCard((await getCardRow(id))!) }
+    return { card: toCard((await getCardRow(id, req.userId))!) }
   })
 
   app.post('/api/cards/:id/restore', async (req, reply) => {
     const { id } = req.params as { id: string }
-    const row = await getCardRow(id)
+    const row = await getCardRow(id, req.userId)
     if (!row) return reply.code(404).send({ error: 'not_found' })
     await q(
       `update cards set state = 'active', dropped_at = null, dropped_reason = null,
               horizon = case when horizon = 'someday' then 'week' else horizon end,
               updated_at = now()
-       where id = $1`,
-      [id],
+       where id = $1 and user_id = $2`,
+      [id, req.userId],
     )
     await logEvent(id, 'me', 'restored', {})
-    return { card: toCard((await getCardRow(id))!) }
+    return { card: toCard((await getCardRow(id, req.userId))!) }
   })
 
   app.post('/api/cards/:id/research', async (req, reply) => {
     const { id } = req.params as { id: string }
-    const card = await getCardRow(id)
+    const card = await getCardRow(id, req.userId)
     if (!card) return reply.code(404).send({ error: 'not_found' })
     const own = await q<{ body: string }>(
       "select body from notes where card_id = $1 and author = 'me' and status = 'active' limit 8",
@@ -352,9 +367,12 @@ export function registerCardRoutes(app: FastifyInstance) {
       `insert into notes (card_id, author, kind, body) values ($1,'agent','research',$2) returning *`,
       [id, draft],
     )
-    await q("update cards set research_status = 'seen', updated_at = now() where id = $1", [id])
+    await q(
+      "update cards set research_status = 'seen', updated_at = now() where id = $1 and user_id = $2",
+      [id, req.userId],
+    )
     await logEvent(id, 'agent', 'agent_research', { trigger: 'on_demand' })
-    await refreshCardEmbedding(id)
+    await refreshCardEmbedding(id, req.userId)
     return { note: mapNote(row!) }
   })
 
@@ -362,6 +380,7 @@ export function registerCardRoutes(app: FastifyInstance) {
   app.post('/api/cards/:id/checklist', async (req, reply) => {
     const { id } = req.params as { id: string }
     const body = z.object({ title: z.string().min(1).max(300) }).parse(req.body ?? {})
+    if (!(await getCardRow(id, req.userId))) return reply.code(404).send({ error: 'not_found' })
     const last = await one<{ max: number }>(
       'select coalesce(max(position), 0) + 1024 as max from checklists where card_id = $1',
       [id],
@@ -383,21 +402,29 @@ export function registerCardRoutes(app: FastifyInstance) {
     if (body.title !== undefined) { values.push(body.title); sets.push(`title = $${values.length}`) }
     if (body.done !== undefined) { values.push(body.done); sets.push(`done = $${values.length}`) }
     if (sets.length) {
-      values.push(id)
-      await q(`update checklists set ${sets.join(', ')} where id = $${values.length}`, values)
+      values.push(id, req.userId)
+      await q(
+        `update checklists set ${sets.join(', ')} where id = $${values.length - 1}
+           and card_id in (select id from cards where user_id = $${values.length})`,
+        values,
+      )
     }
     return { ok: true }
   })
 
   app.delete('/api/checklist/:id', async (req) => {
     const { id } = req.params as { id: string }
-    await q('delete from checklists where id = $1', [id])
+    await q(
+      'delete from checklists where id = $1 and card_id in (select id from cards where user_id = $2)',
+      [id, req.userId],
+    )
     return { ok: true }
   })
 
   // ── заметки ─────────────────────────────────────────────────
   app.post('/api/cards/:id/notes', async (req, reply) => {
     const { id } = req.params as { id: string }
+    if (!(await getCardRow(id, req.userId))) return reply.code(404).send({ error: 'not_found' })
     const body = z
       .object({
         body: z.string().min(1),
@@ -415,7 +442,7 @@ export function registerCardRoutes(app: FastifyInstance) {
     await logEvent(id, body.author, body.author === 'agent' ? 'agent_note' : 'note_added', {
       kind: body.kind,
     })
-    await refreshCardEmbedding(id)
+    await refreshCardEmbedding(id, req.userId)
     return reply.code(201).send({ note: mapNote(row!) })
   })
 
@@ -440,19 +467,28 @@ export function registerCardRoutes(app: FastifyInstance) {
       sets.push(`status = $${values.length}`)
     }
     values.push(id)
-    const row = await one(`update notes set ${sets.join(', ')} where id = $${values.length} returning *`, values)
+    values.push(req.userId)
+    const row = await one(
+      `update notes set ${sets.join(', ')} where id = $${values.length - 1}
+         and card_id in (select id from cards where user_id = $${values.length}) returning *`,
+      values,
+    )
     return { note: row ? mapNote(row) : null }
   })
 
   app.delete('/api/notes/:id', async (req) => {
     const { id } = req.params as { id: string }
-    await q('delete from notes where id = $1', [id])
+    await q(
+      'delete from notes where id = $1 and card_id in (select id from cards where user_id = $2)',
+      [id, req.userId],
+    )
     return { ok: true }
   })
 
   // ── вложения ────────────────────────────────────────────────
   app.post('/api/cards/:id/attachments', async (req, reply) => {
     const { id } = req.params as { id: string }
+    if (!(await getCardRow(id, req.userId))) return reply.code(404).send({ error: 'not_found' })
     const body = z
       .object({
         kind: z.enum(['link', 'file', 'image', 'document']),
@@ -472,10 +508,10 @@ export function registerCardRoutes(app: FastifyInstance) {
   })
 }
 
-async function nextPosition(horizon: string): Promise<number> {
+async function nextPosition(userId: string, horizon: string): Promise<number> {
   const row = await one<{ max: number }>(
-    'select coalesce(max(sort_order), 0) + 1024 as max from cards where horizon = $1',
-    [horizon],
+    'select coalesce(max(sort_order), 0) + 1024 as max from cards where user_id = $1 and horizon = $2',
+    [userId, horizon],
   )
   return Number(row?.max ?? 1024)
 }

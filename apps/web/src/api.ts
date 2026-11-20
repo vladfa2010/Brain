@@ -2,13 +2,37 @@ import type {
   Bootstrap, Card, CardDetail, ChecklistItem, Dashboard, Note,
 } from './types'
 
-export function getToken(): string {
-  return localStorage.getItem('sb.token') ?? ''
+export type AuthUser = { id: string; email: string; name: string | null }
+
+let accessToken: string | null = null
+export function setAccessToken(token: string | null) {
+  accessToken = token
 }
 
-export function setToken(token: string | null) {
-  if (token) localStorage.setItem('sb.token', token)
-  else localStorage.removeItem('sb.token')
+let refreshPromise: Promise<boolean> | null = null
+
+/** Обновление сессии по httpOnly-куке. Один запрос на всех, кто ждёт. */
+export function refreshSession(): Promise<boolean> {
+  if (!refreshPromise) {
+    refreshPromise = fetch('/api/auth/refresh', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'content-type': 'application/json' },
+      body: '{}',
+    })
+      .then(async (res) => {
+        if (!res.ok) return false
+        const data = (await res.json()) as { accessToken: string; user: AuthUser }
+        setAccessToken(data.accessToken)
+        window.dispatchEvent(new CustomEvent('sb:auth', { detail: data.user }))
+        return true
+      })
+      .catch(() => false)
+      .finally(() => {
+        refreshPromise = null
+      })
+  }
+  return refreshPromise
 }
 
 export class ApiError extends Error {
@@ -21,16 +45,20 @@ export class ApiError extends Error {
   }
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const token = getToken()
+async function request<T>(path: string, init?: RequestInit, retried = false): Promise<T> {
+  const headers: Record<string, string> = { 'content-type': 'application/json' }
+  if (accessToken) headers.authorization = `Bearer ${accessToken}`
+
   const res = await fetch(`/api${path}`, {
     ...init,
-    headers: {
-      'content-type': 'application/json',
-      ...(token ? { authorization: `Bearer ${token}` } : {}),
-      ...(init?.headers ?? {}),
-    },
+    credentials: 'same-origin',
+    headers: { ...headers, ...(init?.headers as Record<string, string> | undefined) },
   })
+
+  if (res.status === 401 && !path.startsWith('/auth/') && !retried) {
+    const ok = await refreshSession()
+    if (ok) return request<T>(path, init, true)
+  }
   if (!res.ok) {
     const data = (await res.json().catch(() => ({}))) as Record<string, unknown>
     if (res.status === 401) window.dispatchEvent(new Event('sb:unauthorized'))
@@ -40,6 +68,28 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
+  auth: {
+    status: () => request<{ hasUsers: boolean }>('/auth/status'),
+    register: async (body: { email: string; password: string; name?: string }) => {
+      const data = await request<{ accessToken: string; user: AuthUser }>('/auth/register', {
+        method: 'POST', body: JSON.stringify(body),
+      })
+      setAccessToken(data.accessToken)
+      return data
+    },
+    login: async (body: { email: string; password: string }) => {
+      const data = await request<{ accessToken: string; user: AuthUser }>('/auth/login', {
+        method: 'POST', body: JSON.stringify(body),
+      })
+      setAccessToken(data.accessToken)
+      return data
+    },
+    logout: async () => {
+      await fetch('/api/auth/logout', { method: 'POST', credentials: 'same-origin' })
+      setAccessToken(null)
+    },
+  },
+
   bootstrap: () => request<Bootstrap>('/bootstrap'),
   dashboard: () => request<Dashboard>('/dashboard'),
   board: () => request<{ cards: Card[]; areas: Bootstrap['areas']; projects: Bootstrap['projects'] }>('/board'),
@@ -78,11 +128,6 @@ export const api = {
 
   addAttachment: (cardId: string, body: { kind: string; url?: string; title?: string; site?: string }) =>
     request(`/cards/${cardId}/attachments`, { method: 'POST', body: JSON.stringify(body) }),
-
-  probeAuth: async (token: string) => {
-    const res = await fetch('/api/bootstrap', { headers: { authorization: `Bearer ${token}` } })
-    return res.ok
-  },
 
   capture: (text: string) =>
     request<{ cardId: string; kind: string; title: string }>('/capture', {

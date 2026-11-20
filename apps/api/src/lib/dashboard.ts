@@ -1,5 +1,5 @@
 import { one, q } from '../db.js'
-import { listCards, toCard } from './cards.js'
+import { getCardRow, listCards, toCard } from './cards.js'
 import { buildAdvice } from '../agent/advice.js'
 
 const REASON_LABEL: Record<string, string> = {
@@ -8,14 +8,17 @@ const REASON_LABEL: Record<string, string> = {
 
 export type Dashboard = Awaited<ReturnType<typeof getDashboard>>
 
-export async function getDashboard() {
+export async function getDashboard(userId: string) {
   const today = await listCards(
+    userId,
     "c.state = 'active' and c.horizon = 'today' and c.stage <> 'done' and c.parent_id is null",
   )
   const waiting = await listCards(
+    userId,
     "c.state = 'active' and c.stage = 'waiting' and c.parent_id is null",
   )
   const week = await listCards(
+    userId,
     "c.state = 'active' and c.horizon = 'week' and c.stage not in ('done','waiting') and c.parent_id is null",
   )
 
@@ -25,9 +28,10 @@ export async function getDashboard() {
               where card_id = c.id and type = 'postponed'
               order by created_at desc limit 1) as reason
      from cards c
-     where c.state = 'active' and c.postpone_count >= 2 and c.parent_id is null
+     where c.user_id = $1 and c.state = 'active' and c.postpone_count >= 2 and c.parent_id is null
      order by c.postpone_count desc, c.last_postponed_at desc
      limit 6`,
+    [userId],
   )
 
   const researchRows = await q<{ id: string; title: string; ready: boolean }>(
@@ -36,16 +40,18 @@ export async function getDashboard() {
                    where n.card_id = c.id and n.author = 'agent'
                      and n.kind = 'research' and n.status = 'active') as ready
      from cards c
-     where c.type = 'research' and c.state = 'active' and c.parent_id is null
+     where c.user_id = $1 and c.type = 'research' and c.state = 'active' and c.parent_id is null
        and (c.research_status is distinct from 'concluded')
      order by ready desc, c.created_at desc`,
+    [userId],
   )
 
   const reasonRows = await q<{ reason: string | null; n: string }>(
-    `select payload->>'reason' as reason, count(*) as n
-     from events
-     where type = 'postponed' and created_at > now() - interval '30 days'
+    `select e.payload->>'reason' as reason, count(*) as n
+     from events e join cards c on c.id = e.card_id
+     where c.user_id = $1 and e.type = 'postponed' and e.created_at > now() - interval '30 days'
      group by 1`,
+    [userId],
   )
   const reasons: Record<string, number> = {}
   for (const r of reasonRows) if (r.reason) reasons[r.reason] = Number(r.n)
@@ -54,16 +60,21 @@ export async function getDashboard() {
     inbox: string; done_today: string; done_week: string; overdue: string; rolled: string
   }>(`
     select
-      (select count(*) from cards where horizon='inbox' and state='active' and stage<>'done') as inbox,
-      (select count(*) from cards where stage='done' and completed_at::date = current_date) as done_today,
-      (select count(*) from cards where stage='done' and completed_at > now() - interval '7 days') as done_week,
-      (select count(*) from cards where state='active' and stage<>'done' and due_at < now()) as overdue,
-      (select count(*) from events where type='rollover' and created_at::date = current_date) as rolled
-  `)
+      (select count(*) from cards where user_id = $1 and horizon='inbox' and state='active' and stage<>'done') as inbox,
+      (select count(*) from cards where user_id = $1 and stage='done' and completed_at::date = current_date) as done_today,
+      (select count(*) from cards where user_id = $1 and stage='done' and completed_at > now() - interval '7 days') as done_week,
+      (select count(*) from cards where user_id = $1 and state='active' and stage<>'done' and due_at < now()) as overdue,
+      (select count(*) from events e join cards c on c.id = e.card_id
+        where c.user_id = $1 and e.type='rollover' and e.created_at::date = current_date) as rolled
+  `, [userId])
 
   const todayMinutes = today.reduce((sum, c) => sum + (c.estimateMin ?? 20), 0)
 
   const decisions: { card: ReturnType<typeof toCard>; reason: string; weight: number }[] = []
+  const cardById = async (id: string) => {
+    const row = await getCardRow(id, userId)
+    return row ? toCard(row) : null
+  }
 
   for (const row of researchRows.filter((r) => r.ready).slice(0, 2)) {
     const card = await cardById(row.id)
@@ -99,7 +110,7 @@ export async function getDashboard() {
     waitingOverdue: decisions.filter((d) => d.reason === 'срок прошёл').length,
   })
 
-  const brief = await one('select * from briefs where day = current_date')
+  const brief = await one('select * from briefs where user_id = $1 and day = current_date', [userId])
 
   return {
     today,
@@ -118,10 +129,4 @@ export async function getDashboard() {
     },
     researchCount: researchRows.length,
   }
-}
-
-async function cardById(id: string) {
-  const { getCardRow } = await import('./cards.js')
-  const row = await getCardRow(id)
-  return row ? toCard(row) : null
 }
