@@ -61,7 +61,9 @@ async function request<T>(path: string, init?: RequestInit, retried = false): Pr
   }
   if (!res.ok) {
     const data = (await res.json().catch(() => ({}))) as Record<string, unknown>
-    if (res.status === 401) window.dispatchEvent(new Event('sb:unauthorized'))
+    if (res.status === 401 && !path.startsWith('/auth/')) {
+      window.dispatchEvent(new Event('sb:unauthorized'))
+    }
     throw new ApiError(res.status, data)
   }
   return res.json() as Promise<T>
