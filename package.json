@@ -11,7 +11,8 @@
     "db:seed": "pnpm --filter @sb/api seed",
     "db:reset": "pnpm --filter @sb/api reset",
     "brief": "pnpm --filter @sb/api brief",
-    "backup": "./scripts/backup.sh"
+    "backup": "./scripts/backup.sh",
+    "user:create": "pnpm --filter @sb/api user:create"
   },
   "packageManager": "pnpm@12.18.0",
   "pnpm": {

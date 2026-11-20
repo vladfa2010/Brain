@@ -10,7 +10,8 @@
     "reset": "tsx src/migrate.ts --reset && tsx src/seed.ts",
     "build": "tsc -p tsconfig.build.json",
     "brief": "tsx src/brief.ts",
-    "start:prod": "node dist/index.js"
+    "start:prod": "node dist/index.js",
+    "user:create": "tsx src/createUser.ts"
   },
   "dependencies": {
     "@fastify/cookie": "^11.1.5",
